@@ -1,0 +1,451 @@
+---
+title: "Regression - Final project"
+author: "Victoire de Termont and Sarah Jallot"
+date: "12/3/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+Our objective is to predict the prices of residential homes in Ames, Iowa accurately. Our key metric will be the RMSE on test data.     
+The training data consists of 66 categorical and quantitative variables extensively describing 1,095 residential homes in Ames, Iowa, and the houses' corresponding price in dollars. Discriminating between relevant and non relevant regressors to foster sparsity in our model is paramount for an efficient and robust model.  
+    
+We first investigate numerical and factor variables sequentially. log(SalePrice) is close to a Gaussian distribution, with a few extreme outliers. A PCA on numerical variables shows that 19/23 numerical variables account for 99% of the sample variance. We distinguish three types of factors: factors with an overrepresented level, some with high cardinality, and others with standard level repartition. 
+We then perform elementary factor pruning and intra-factor modality regrouping before using ANOVA to remove factors manually. We do not touch numerical variables but instead rely on our model to make a selection.  
+We fit two linear models using stepwise selection procedure with the AIC criterion to foster sparsity. In the first model, we predict log(SalePrice), before removing outliers after testing them. In the second model, we winsorise log(SalePrice) as we noticed that extreme outliers made our model less robust.  In both cases we retain the backward selection model. Model 1 predicts the test data much more accurately than model 2 (24 000 dollars vs 33 000 dollars), but model 2 validates the regression assumptions more clearly. We retain model 1: it generalises better, and meets the postulates. Our predictions are much better under the 300K threshold for SalePrice. Had we had enough datapoints, we could have fitted two models: one for values underneath and above that threshold.
+  
+\textbf{I. Introduction - Data description}  
+We first contextualise the pre-processed data.
+```{r, include = FALSE}
+load("DataProject.RData")
+home = train[,2:ncol(train)]
+head(home)
+```
+The data we are handling is heterogeneous, although it is presented in a structured manner. We are dealing both with categorical and quantitative variables, which we will consider separately.  
+`````{r, include = FALSE } 
+summary(home)
+```
+We observe in the data summary that a full model would include 66 features and an intercept, and 1,095 observations. The list of features is extensive: not all regressors will be useful to predict house price. We expect the variable MSZoning to have much more impact on the price that the variable Heating, as the heating system is something that can be changed, whereas the location is permanent. Note that quantitative variables differ in scale and range: prices start from ~35,000 dollars, and can attain 755,000. Before pre-processing, surfaces took higher values than bedrooms above ground which ranged from 1 to 8. Scaling the data allows to reflect the true impact of each regressor on the output.   
+```{r, include = FALSE}
+str(home, give.attr = FALSE)
+```
+R casts some factors as integers: mainly areas and ratings. We decide not to consider years as factors for our predictions to generalise to unencountered years. We recast OverallQual, OverallCond, MoSold, MSSubClass and Fireplaces as factors. We keep other quality-driven variables as numerics to keep model robustness. All quantitative features are integers and price, the output, is the only numeric. R automatically encodes factors: we choose to keep the by default levels, which are  alphabetically ordered.  
+```{r, include = FALSE}
+home$OverallQual = as.factor(home$OverallQual)
+home$OverallCond = as.factor(home$OverallCond)
+home$MoSold = as.factor(home$MoSold)
+home$MSSubClass = as.factor(home$MSSubClass)
+home$Fireplaces = as.factor(home$Fireplaces)
+```
+We check there are no missing values in the pre-processed data before launching into the analysis: there are 0 missing values in our dataframe. 
+```{r, include = FALSE}
+cat("There are", sum(is.na(home)), "missing values in our dataframe.")
+```
+\textbf{II. Exploratory data analysis - Initial modeling} 
+1. Numerical analysis.  
+We find that we should predict log(SalePrice) to liken it to a gaussian. We then analyse the feature correlation matrix and perform a PCA: 19/23 numerical variables account for 99% of the variance. We left it out for concision but it is graphically available in the code. We count on stepwise selection to eliminate superfluous numerical regressors.
+```{r, include = FALSE}
+# Extracting all numerical variables
+nums = unlist(lapply(home, is.numeric))
+home_numerical = (home[ , nums])
+```
+We first observe the output, SalePrice. 
+```{r, fig.width = 4, fig.height = 3, fig.align = "center"}
+par(mfrow=c(1,2))
+# A few observations on SalePrice. 
+hist(home_numerical$SalePrice, main = "SalePrice", cex.main = 0.8, cex.axis = 0.5, cex.lab = 0.5)
+boxplot(home_numerical$SalePrice, main = "SalePrice", cex.main = 0.8, cex.axis = 0.5, cex.lab = 0.5)
+```
+
+```{r, include = FALSE}
+library(e1071) 
+cat("Data skewness is", skewness(home$SalePrice))
+```
+SalePrice skewness is very high at 1.92 : Saleprice mean is ~181,196 whereas the median is much lower at ~164,500. We may have trouble predicting RHS extremes. To smoothen the output and we will consider the log(SalePrice). If this isn't enough, we could go a step further by either trimming or modifying outlier values to improve our generalisation error.  
+```{r, fig.width = 4, fig.height = 2, fig.align = "center"}
+par(mfrow=c(1,3))
+hist(log(home$SalePrice), cex.main = 1.2, main = "log(SalePrice)")
+boxplot(log(home_numerical[,"SalePrice"]),cex.main = 1.2)
+qqnorm(log(home_numerical$SalePrice),cex.main = 1.2)
+```
+log(SalePrice) is pretty close to a normal distribution, except for extreme values. 
+```{r, fig.width = 3, fig.height =3, fig.align = "center"}
+# Correlation matrix for numerical features
+library(corrplot)
+R = round(cor(home_numerical),2)
+corrplot(R, method='ellipse', tl.cex = 0.5)
+```
+The numerical features that are the most correlated with SalePrice are: GrLivArea, GarageArea and GarageCars, 1st & 2ndFlrSF, YearBuilt GarageYrBuilt & YearRemodAdd. Areas and surfaces are all related to square feet, which we know is a key driver in house sales. The construction or modernisation works are an indicator of overall quality of the housing and the investments that went into it, so it makes sense for them to be correlated to SalePrice. 
+On the contrary, YrSold and BsmtHalfBath are poorly correlated to SalePrice. YrSold is correlated to none of the other features, so it is an irrelevant regressor: the decision to sell a house doesn't have much to do with what drives its price or the price one can sell it at. 
+The correlation matrix does not take into account feature interactions, so we will leave numerical feature selection to our stepwise model procedures. 
+
+Our intuition is that three feature types mainly drive SalePrices: area/surface, location and quality. 
+Let's describe 1stFlrSF as it is the closest feature to square feet with 2ndFloorSF.
+```{r, fig.width = 4, fig.height = 2, fig.align = "center"}
+par(mfrow=c(1,3))
+# Surface
+hist((home_numerical$`1stFlrSF`), main = "1stFloorSF", cex.main = 0.8)
+boxplot((home_numerical$`1stFlrSF`), main = "1stFloorSF", cex.main = 0.8)
+qqnorm(home_numerical$`1stFlrSF`,cex.main = 1.2)
+```
+From these three graphs, we can assume a Gaussian distribution on 1stFloorSF.  
+Because PCA works best with (scaled) numerical data, we perform it on the numerical features of our preprocessed data. 19/23 numerical variables account for ~99% of the variance. 
+```{r, fig.width = 5, fig.height = 3, fig.align = "center", include = FALSE}
+home_numerical_output = home_numerical$SalePrice
+home_numerical_features = home_numerical[,2:ncol(home_numerical)] # we will perform the PCA analysis on this dataset. 
+
+pca.train = home_numerical_features
+prin_comp = prcomp(pca.train, center = TRUE, scale. = TRUE)
+
+# Compute standard deviation of each principal component
+std_dev = prin_comp$sdev
+
+# Compute variance
+pr_var = std_dev^2
+prop_varex = pr_var/sum(pr_var)
+
+# Cumulative scree plot
+plot(cumsum(prop_varex), 
+     xlab = "Principal Component", 
+     ylab = "Cumulative Proportion of Variance Explained",
+     type = "b")
+
+abline(h=1, col='red')
+abline(v=19, col='black', lty = 3)
+```
+  
+3. Factor analysis.  
+We first investigate level fragmentation within the factors. We discover three types of factors, as per examples below.  
+```{r, fig.width = 4, fig.height = 2, fig.align = "center"}
+par(mfrow=c(1,3))
+# Getting our factors
+factors = unlist(lapply(home, is.factor))
+home_factors = home[,factors]
+
+# Street 
+barplot(table(home_factors$Street)[order(table(home_factors$Street))], main = "Street")
+# Neighbourhood
+barplot(table(home_factors$Neighborhood)[order(table(home_factors$Neighborhood))], main = "Neighbourhood")
+# Garage Finish
+barplot(table(home_factors$GarageFinish)[order(table(home_factors$GarageFinish))], main = "GarageFinish")
+```
+i) Clear underrepresentation of some levels: in Street and Utilities, which are binary, this is conspicuous. From this we infer that these factors will not be useful in predicting house price in general: nearly all houses will be in the same category along these factors (and for those who are not, data is too sparse to generalise well). Note that this is also the case for RoofMatl, Heating, BsmtFinType2, Electrical, GarageCond, GarageQual.  
+ii) High cardinality in the number of levels: this is especially the case for neighbourhood, which has 25 levels. We regroup some of these levels together to improve our predictions.Note that this is also the case for Exterior1st, Exterior2nd, BsmtExposure. 
+iii) Classic factor repartition with reasonable representation of each modality, as is the case for Housestyle for instance. Note that this is also the case for HeatingQC, GarageFinish, BsmtFinType1.  
+Intuitively, we said that both location and overall quality will impact SalePrice significantly. Let us check this with anova and ancova tests. 
+```{r, fig.height = 3, fig.align = "center", include = FALSE}
+library(gridExtra)
+# Area
+par(mfrow=c(1,2))
+library(ggplot2)
+plot1 = ggplot(home, 
+       aes(x=MSZoning, 
+           y=SalePrice, 
+           colour=MSZoning, 
+           group = MSZoning, 
+           fill = MSZoning)) + geom_boxplot(alpha=0.5, outlier.alpha=0) +geom_jitter(width=0.1)
+```
+
+```{r, fig.height = 2, fig.align = "center"}
+# Overall quality 
+plot2 = ggplot(home, 
+       aes(x=OverallQual, 
+           y=SalePrice, 
+           colour= OverallQual, 
+           group = OverallQual, 
+           fill = OverallQual)) + geom_boxplot(alpha=0.5, outlier.alpha=0) +geom_jitter(width=0.1)
+grid.arrange(plot2,ncol=1)
+```
+Graphically, we see that overall quality ratings have significant impact over the median SalePrice.
+```{r, include = FALSE}
+# Anova on area
+mod1 <- lm(SalePrice ~ MSZoning-1 , data=home)
+anova(mod1)
+
+# Anova on OverallQual
+mod2 <- lm(SalePrice ~ OverallQual-1 , data=home)
+anova(mod2)
+```
+We run two ANOVA tests (available in the code) to confirm that area and overall quality both individually have a strong effect on SalePrice: we get a p-value of order e-16. 
+```{r, include = FALSE}
+# ANCOVA on quality and area
+mod3 <- lm(SalePrice~1 + MSZoning + OverallQual + OverallQual:MSZoning, data = home)
+anova(mod3)
+```
+Our ANCOVA shows that MSZoning, OverallQual and their interaction are highly significant towards explaining SalePrice. So we will keep these factors.  
+
+\textbf{III. Modeling and diagnostics}  
+We implement stepwise selection with an AIC criterion for sparsity. We predict SalePrice's logarithm to improve our target smoothness and estimated residuals homoscedasticity. In our first model, we notice that our 8 outliers are located towards the bottom values of SalePrice. They prevent us from validating our postulates, mainly homoscedasticity and gaussianity. Removing them gives a more robust model, but we thought of  fitting a second model where instead of removing the outliers after model fit, we use the winsor method to reaffect extreme values and normalise our data before model fit. Doing this improves model robustness (the postulates) but also meaningfully increases our MSE on test data. 
+```{r, include = FALSE}
+winsor1 <- function (x, fraction=.05)
+{if(length(fraction) != 1 || fraction < 0 ||fraction > 0.5) {stop("bad value for 'fraction'")}
+lim <- quantile(x, probs=c(fraction, 1-fraction))
+x[ x < lim[1] ] <- lim[1]
+x[ x > lim[2] ] <- lim[2]
+x}
+```
+We noted earlier that many categorical variables could be considered uninformative or redundant. 
+- We removed factors with massively overrepresented categories: Street, Utilities, RoofMatl, Condition2, Heating, Electrical, Functional, GarageCond.  
+We also made some regroupments within factors to diminish cardinality, mostly for neighbourhood by creating two new categories: under 20 and 50 sales. 
+- Based on Anova tests, we removed other factors to improve model robustness: OverallCond, Exterior1st, Exterior2nd. OverallCond in particular was too specific and weakened our model by creating observations with leverage one.
+```{r}
+# Ancova on OverallQual and OverallCond
+mod5 <- lm(SalePrice~1 + OverallQual + OverallCond + OverallQual:OverallCond, data = home)
+anova(mod5)
+```
+- For some features, we were not sure wether or not they had an influence, so we tested the model with and without them and removed them if they were not improving our score : HeatingQC, SaleCondition, BsmtFinType2, RoofStyle, ExterQual. 
+```{r, include = FALSE}
+col_to_remove <- c("Street", "Utilities", "RoofMatl", "Condition2","Heating", "Electrical", "Functional", "GarageCond","Exterior1st", "Exterior2nd", "OverallCond", "HeatingQC", "SaleCondition", "BsmtFinType2","RoofStyle", "ExterQual")
+for (name in col_to_remove){cat(which(colnames(home)==name)," ")}
+```
+
+```{r, include=FALSE}
+# Elementary pruning and regrouping of categories
+# Regrouping neighbourhoods of less than 20 and 50 sales together 
+table_neighborhood <- table(home$Neighborhood)
+table_neighborhood[order(table_neighborhood)]
+
+levels(home$Neighborhood) <- c(levels(home$Neighborhood), "N_Under20Sales","N_Under50Sales") 
+home$Neighborhood[home$Neighborhood %in% c("Blueste","NPkVill","Veenker","BrDale","Blmngtn","MeadowV")] = "N_Under20Sales"
+home$Neighborhood[home$Neighborhood %in% c("StoneBr","SWISU","ClearCr","IDOTRR","Timber","NoRidge","Mitchel")] = "N_Under50Sales"
+
+# Roofstyle
+table(home$RoofStyle)[order(table(home$RoofStyle))]
+levels(home$RoofStyle) <- c(levels(home$RoofStyle), "RS_Other") 
+home$RoofStyle[home$RoofStyle %in% c("Shed","Mansard","Gambrel","Flat")] = "RS_Other"
+
+# Condition 1
+table(home$Condition1)[order(table(home$Condition1))]
+levels(home$Condition1) <- c(levels(home$Condition1), "C_Other") 
+home$Condition1[home$Condition1 %in% c("RRNe","RRNn","PosA","RRAe","PosN","RRAn","Artery")] = "C_Other"
+
+# ExterCond
+table(home$ExterCond)[order(table(home$ExterCond))]
+levels(home$ExterCond) <- c(levels(home$ExterCond), "EC_Other") 
+home$ExterCond[home$ExterCond %in% c("Po", "Ex", "Fa", "Gd")] = "EC_Other"
+
+# OverallQual
+table(home$OverallQual)
+levels(home$OverallQual) <- c(levels(home$OverallQual), "Very_Low") 
+home$OverallQual[home$OverallQual %in% c("-4.27238846180047", "-3.28279659466729", "-2.38962301582022")] = "Very_Low"
+```
+
+```{r, include=FALSE}
+# Feature trimming based on our above factor analysis
+home_streamlined <- home[-c(5, 8, 21, 13, 37, 40, 51, 59, 22, 23, 17, 38, 66, 34, 20, 26, 17)]
+```
+After working on our factors, we start by fitting a full linear model to predict log(SalePrice).
+```{r, include = FALSE}
+full_model1 <- lm(log(SalePrice)~., data = home_streamlined)
+summary(full_model1)
+```
+Running a model with all the variables excluding the ones we just removed, we obtain an adjusted R-squared of 0.91. Many variables could be removed from our model while marginally affecting its efficiency to explain SalePrice. To improve model efficiency, we perform a selection of variables based on forward, backward and both methods. 
+```{r, include = FALSE}
+library(MASS)
+# Forward method, backward method, and both to reduce our number of features
+linear_select_variables_forward = stepAIC(full_model1, data=home_streamlined, trace=0, direction=c("forward"), verbose = FALSE)
+linear_select_variables_backward = stepAIC(full_model1,~., trace=0, direction=c("backward") )
+linear_select_variables_both = stepAIC(full_model1, trace=0, direction=c("both"))
+```
+We choose the model with the smallest AIC.  
+```{r}
+extractAIC(linear_select_variables_forward)
+extractAIC(linear_select_variables_backward)
+extractAIC(linear_select_variables_both)
+```
+The 34-feature model including the intercept extracted by backward and both is the same. Its AIC is smaller than the one of the forward method. We arbitrarily select the backward model. 
+Let's verify the postulates.   
+```{r}
+# Validate (or not) the postulates 
+par(mfrow=c(3,3))
+plot(linear_select_variables_backward, which=1) # P1
+plot(linear_select_variables_backward, which=3) # P2
+acf(residuals(linear_select_variables_backward), main= "Auto-correlation plot") # P3
+plot(linear_select_variables_backward, which=2) # P4
+plot(linear_select_variables_backward, which=5) # Cook's distance
+```
+We validate P1, centered errors, without hesitation. We notice a slight elliptical behaviour of our residuals in the Scale-Location plot, potentially problematic for P3 or residual homoscedasticity. Our model may predict extreme SalePrice values less well than others. However, we validate the postulate given the plot range of that behaviour (between 1 and 1.5). Observations 336, 199 and 596 have particularly high standardised residuals. We do not validate P3, the uncorrelation assumption - one bar exceeds the fitted-line threshold.
+P4 can be validated, but again we notice the strange behaviour of tail values, towards the left-hand-side this time. Points which are not aligned with the normal distribution quantiles are limited given the number of observations we have. Note however that observations 199, 336 and 596 appear again: they are far from the theoretical quantiles. 
+None of our observations has a Cook distance bigger than one. Observation 199 is the closest to this threshold, meaning it has significant leverage and residual abnormality.The second closest is observation 596, again. 
+Let's perform an outlier analysis to see if this helps to validate our postulates. 
+```{r, fig.width = 4, fig.height = 3, fig.align = "center"}
+library(car)
+influenceIndexPlot(linear_select_variables_backward)
+```
+Unsurprisingly, observations 199 and 596 are very clear outliers in nearly all our tests. In the Cook's distance plot, they are close to the 1 threshold albeit under it. Their studentised residuals values are smaller than -8 (versus a -2 assumption for a 95% confidence interval), Bonferroni is of order e-13, the hat values of order e-16. 
+Studentized residuals plot: 30 points are below -2, and 23 are over 2. Our model allows for ~55 outliers within a 95% confidence interval and we are within that threshold. Extreme values are preoccupying: observations 199, 336, 596, 618, 633, 692 and 809 are smaller than -4. 
+Bonferroni's plot : 6 points have a p-value inferior to 0.5, so they are outliers according to this criterion.  
+Hat plot: observations 459 and 687 have leverage at 0.68, well over 0.5.  
+```{r, include = FALSE}
+# Finding the outliers of our model
+outlierTest(linear_select_variables_backward)
+```
+An outlier test confirms that 199, 596 and 336 are very clear outliers and they have significant leverage. So we remove them without question. The other outliers we get by the outlier test are outliers by far also, so we remove them. 
+```{r, include = FALSE}
+# Plotting our regression outliers
+home_streamlined[c(199, 596, 336, 692, 618, 633, 323, 809),1:ncol(home_streamlined)] 
+```
+
+```{r, include = FALSE}
+# Building the dataframe without those outliers 
+home_no_outliers <- home_streamlined[-c(199, 596, 336, 692, 618, 633, 323, 809),]
+```
+
+```{r, include = FALSE}
+# Getting our regression model to use it on our new dataframe without outliers
+summary(linear_select_variables_backward)
+```
+
+```{r, include = FALSE}
+# The first model we will examine is the following:
+model1 = lm(formula = log(SalePrice) ~ MSSubClass + MSZoning + LotFrontage + 
+    LotArea + LandContour + LotConfig + LandSlope + Neighborhood + 
+    Condition1 + OverallQual + YearBuilt + YearRemodAdd + MasVnrType + 
+    MasVnrArea + ExterCond + Foundation + BsmtCond + BsmtExposure + 
+    BsmtFinSF1 + BsmtUnfSF + CentralAir + GrLivArea + BsmtFullBath + 
+    FullBath + HalfBath + KitchenQual + Fireplaces + GarageType + 
+    GarageCars + GarageQual + WoodDeckSF + MoSold + YrSold, data = home_no_outliers)
+```
+
+```{r, include = FALSE}
+summary(model1)
+```
+We now have an adjusted r-squared of 93% on train data.  
+```{r, message= FALSE, comment=FALSE}
+# Testing the postulates on our model 1
+par(mfrow=c(3,3))
+plot(model1, which=1) # P1
+plot(model1, which=3) # P2
+acf(residuals(model1), main= "Auto-correlation plot") # P3
+plot(model1, which=2) # P4
+plot(model1, which=5) # Cook's distance
+```
+The postulates are about verified for this model. Residuals are centered. Scale-location is still slightly elliptic, but we accept it. We now validate autocorrelation.Gaussianity still poses problem for tail values. And no observation has significant Cook distance.  
+  
+We now perform winsorisation on SalePrice and fit a new model.  
+```{r, include = FALSE}
+home_streamlined$SalePrice= (winsor1(home$SalePrice, fraction=.05))
+full_model2 = lm(log(SalePrice)~., data = home_streamlined)
+linear_select_variables_backward_winsor = stepAIC(full_model2,~., trace=0, direction=c("backward") )
+```
+
+```{r, include = FALSE}
+summary(linear_select_variables_backward_winsor)
+```
+We have an adjusted r-squared of 91% on train data.  
+```{r}
+par(mfrow=c(3,3))
+plot(linear_select_variables_backward_winsor, which=1) # P1
+plot(linear_select_variables_backward_winsor, which=3) # P2
+acf(residuals(linear_select_variables_backward_winsor), main= "Auto-correlation plot") # P3
+plot(linear_select_variables_backward_winsor, which=2) # P4
+plot(linear_select_variables_backward_winsor, which=5) # Cook's distance
+```
+This time, residuals are perfectly centered. We validate homoscedasticity and uncorrelation without question. Gaussianity is still troublesome for tail values. No observation has significant Cook's distance. Again, observations 336, 199, 596 can be singled out on all plots. 
+```{r, fig.width = 4, fig.height = 3, fig.align = "center"}
+influenceIndexPlot(linear_select_variables_backward)
+```
+```{r, include = FALSE}
+outlierTest(linear_select_variables_backward_winsor)
+```
+We perform the outlier test to confirm our outliers. Without surprise, 199, 336 and 596 are regression outliers. 633 also is. We remove them. 
+```{r, include = FALSE}
+# Creating our data with no outliers
+home_streamlined[c(199, 336, 596, 633),1:ncol(home_streamlined)]
+home_no_outliers = home_streamlined[-c(199, 336, 596, 633), ]
+```
+```{r}
+model2 = lm(formula = log(SalePrice) ~ MSSubClass + MSZoning + LotFrontage + 
+    LotArea + LotConfig + Neighborhood + Condition1 + OverallQual + 
+    YearBuilt + YearRemodAdd + MasVnrType + MasVnrArea + BsmtCond + 
+    BsmtExposure + BsmtFinSF1 + BsmtUnfSF + TotalBsmtSF + CentralAir + 
+    `1stFlrSF` + GrLivArea + BsmtFullBath + FullBath + HalfBath + 
+    KitchenQual + Fireplaces + GarageType + GarageYrBlt + GarageCars + 
+    GarageQual + WoodDeckSF + MoSold + YrSold, data = home_no_outliers)
+```
+
+```{r, include = FALSE}
+summary(model2)
+```
+Our winsorised model has a 93% R-squared on train data once we remove the outliers.
+```{r fig.width = 3, fig.height = 2, fig.align = "center", include = FALSE}
+plot(model2, which=2)
+```
+By a visual analysis we do not display here but available in the code, we approximately validate our last problematic postulate, Gaussianity.
+  
+\textbf{IV. Final models}  
+```{r, include=FALSE}
+# Testing our model on the test set 
+test = test[,2:ncol(test)]
+# Reaffecting test's features to factors
+test$OverallQual = as.factor(test$OverallQual)
+test$OverallCond = as.factor(test$OverallCond)
+test$MoSold = as.factor(test$MoSold)
+test$MSSubClass = as.factor(test$MSSubClass)
+test$Fireplaces = as.factor(test$Fireplaces)
+
+# Regrouping neighbourhoods of less than 20 and 50 sales together
+levels(test$Neighborhood) <- c(levels(test$Neighborhood), "N_Under20Sales","N_Under50Sales") 
+test$Neighborhood[test$Neighborhood %in% c("Blueste","NPkVill","Veenker","BrDale","Blmngtn","MeadowV")] = "N_Under20Sales"
+test$Neighborhood[test$Neighborhood %in% c("StoneBr","SWISU","ClearCr","IDOTRR","Timber","NoRidge","Mitchel")] = "N_Under50Sales"
+
+# Roofstyle
+levels(test$RoofStyle) <- c(levels(test$RoofStyle), "RS_Other") 
+test$RoofStyle[test$RoofStyle %in% c("Shed","Mansard","Gambrel","Flat")] = "RS_Other"
+
+# Condition 1
+levels(test$Condition1) <- c(levels(test$Condition1), "C_Other") 
+test$Condition1[test$Condition1 %in% c("RRNe","RRNn","PosA","RRAe","PosN","RRAn","Artery")] = "C_Other"
+
+# ExterCond
+levels(test$ExterCond) <- c(levels(test$ExterCond), "EC_Other") 
+test$ExterCond[test$ExterCond %in% c("Po", "Ex", "Fa", "Gd")] = "EC_Other"
+
+# OverallQual
+levels(test$OverallQual) <- c(levels(test$OverallQual), "Very_Low") 
+test$OverallQual[test$OverallQual %in% c("-4.27238846180047", "-3.28279659466729", "-2.38962301582022")] = "Very_Low"
+```
+
+```{r, include = FALSE}
+# Computing the test RMSE for model 1 and model 2 
+cat("RMSE for model 1 is", sqrt(mean((test$SalePrice - exp(predict.lm(model1, test))) ^ 2)), " dollars")
+cat(" and RMSE for model 2 is", sqrt(mean((test$SalePrice - exp(predict.lm(model2, test))) ^ 2)), " dollars")
+```
+RMSE for model 1 is ~24,5K  dollars and RMSE for model 2 is 31.0K$. Even though our first model is less robust than the second, its test error is much lower. So this is the one we will retain since it still validates our postulates. 
+Let us analyse its coefficients in detail. 
+Model 1 has a 92% adjusted R-squared on train, validation of our postulates and a 24.5k dollar RMSE on test, it is the model that we keep. 
+Its most important features are: Location and area (MSZoning, neighbourhood); Quality and condition (OverallQual,GarageQual, KitchenQual); YearBuilt and YearRemodAdd.
+As expected, location , quality and condition, and construction/improvement year are our most important features with a high level of significance. 
+Model 2 has a 93% adjusted R-squared on train, validates the postulates, and has a 31.0K dollar RMSE on test. Again we see location with neighbourhood and quality (OverallQual, GarageQual) as important predictors. In both cases, testing our model against the intercept we obtain a p-value of order e-16: we confidently reject that the intercept-reduced model is better to explain SalePrice than our model.  
+Confidence intervals: as model 1 is mostly impacted by factors, doing confidence intervals does not help us visualize the proximity among SalePrice and the most important features. However, doing a 95% confidence interval with LotArea, we notice that this variable is not good at explaning SalePrice by itself, as the price can double for a same value of LotArea. 
+```{r, fig.width=4, fig.height=3, fig.align="center"}
+model <- lm(SalePrice ~ LotArea, data=home)
+plot(home$LotArea, home$SalePrice, xlab="LotArea", ylab="SalePrice", main="Regression", cex.main=0.8, cex.axis=0.5, cex.lab=0.5)
+abline(model, col="lightblue")
+
+newx <- seq(0, 7, by=0.05)
+pred_interval <- predict(model, newdata=data.frame(LotArea=newx), interval="prediction",
+                         level = 0.95)
+lines(newx, pred_interval[,2], col="orange", lty=2)
+lines(newx, pred_interval[,3], col="orange", lty=2)
+```
+
+\textbf{V. Discussion}  
+Compared to the full linear model run on the-processed dataset, our postulates are now much better validated with twice as less features (33 instead of 67).  
+Plotting our errors as a function of SalePrice shows that we perform well under 300K dollars, and badly above with very high residuals for extreme values, which skews the RMSE towards the top. The graph is available in the code. Our average residual error is of 18K for properties under 300K dollars, and 55K for properties above.
+```{r, fig.width=4, fig.height=3,fig.align = "center", include = FALSE }
+# Graphical visualisation of our prediction errors
+test_residuals = sqrt((test$SalePrice - exp(predict.lm(model2, test))) ^ 2)
+plot(test$SalePrice, test_residuals, main = "Absolute Residuals as a function of SalePrice", cex.main=0.8, cex.axis=0.5, cex.lab=0.5)
+```
+A solution would be to fit a model on SalePrices that are above this threshold, another one on those under, and then average their predictions to make our final model. As we could infer from the plot, the skewness of our test residuals is very high at 4.5.  
+```{r, include = FALSE}
+cat("As we could infer from the plot, the skewness of our test residuals is very high at ", skewness(test_residuals))
+```
+
+```{r, include = FALSE}
+test_truncated = test[test$SalePrice < 300000,]
+sqrt(mean((test_truncated$SalePrice - exp(predict.lm(model1, test_truncated))) ^ 2))
+```
+Given that we still use 33 regressors, averaging the predictions of a lasso, a ridge and an elastic net performed on the features of model 1 could have been another solution to improve predictions and model robustness. We tried to do so but had struggles plotting our postulates afterwards, and therefore could not conclude.   
